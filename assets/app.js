@@ -1,5 +1,5 @@
 /* ============================================================
-   墨卷 · 行测真题在线刷题
+   昕真题 · 行测真题在线刷题
    原生 JS，零依赖；数据来自 data/（由 ERRRC/xingcezhenti 解析）
    ============================================================ */
 'use strict';
@@ -286,8 +286,7 @@ routes.home = async () => {
   view.innerHTML = `
   <div class="hero q-enter">
     <div class="eyebrow">2016 — 2026 · 国考 / 省考 / 联考</div>
-    <h1>十年行测真题，<br>安安静静刷完它。</h1>
-    <p class="lead">${idx.total.toLocaleString()} 道真题、515 套整卷（按六大模块拆为 ${idx.papers.length.toLocaleString()} 份练习卷），题干、选项、官方解析齐全。即时判分、错题自动归集，所有记录只存在你的浏览器里。</p>
+    <p class="lead" style="margin-top:4px;">${idx.total.toLocaleString()} 道真题、515 套整卷（按六大模块拆为 ${idx.papers.length.toLocaleString()} 份练习卷），题干、选项、官方解析齐全。即时判分、错题自动归集，所有记录只存在你的浏览器里。</p>
   </div>
 
   <div class="stat-row">
