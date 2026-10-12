@@ -90,13 +90,22 @@ const Data = {
   pCache: new Map(),
   tCache: new Map(),
   async index() {
-    if (!this.idx) {
-      this.idx = fetch('data/index.json').then((r) => {
+    // 注意：成功后必须把“解析后的数据”写回 this.idx（而非 Promise），
+    // 供 listPage 等处同步读取；并发调用共享同一个在途 Promise
+    if (this.idx && !(this.idx instanceof Promise)) return this.idx;
+    if (!this._idxPromise) {
+      this._idxPromise = fetch('data/index.json').then((r) => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return r.json();
-      }).catch((e) => { this.idx = null; throw new Error('题库索引加载失败，请检查网络后刷新重试'); });
+      }).then((data) => {
+        this.idx = data;
+        return data;
+      }).catch((e) => {
+        this._idxPromise = null;
+        throw new Error('题库索引加载失败，请检查网络后刷新重试');
+      });
     }
-    return this.idx;
+    return this._idxPromise;
   },
   async paper(id) {
     if (typeof id !== 'string' || !/^m\d-\d{3}$/.test(id)) throw new Error('试卷地址无效');
