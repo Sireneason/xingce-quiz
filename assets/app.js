@@ -25,16 +25,18 @@ const TYPE_NAME = { single: '单选题', multi: '多选题', judge: '判断题' 
 const K = (k) => `xz1:${k}`;
 const Store = {
   get(k, d) { try { const v = localStorage.getItem(K(k)); return v === null ? d : JSON.parse(v); } catch { return d; } },
-  set(k, v) { try { localStorage.setItem(K(k), JSON.stringify(v)); } catch {} },
-  get settings() { return this.get('settings', {}); },
+  set(k, v) { try { localStorage.setItem(K(k), JSON.stringify(v)); return true; } catch { return false; } },
+  // 读取对象型存储：损坏（null/数组/非对象 JSON）时回退为空对象，避免后续崩溃
+  obj(k) { const v = this.get(k, {}); return v && typeof v === 'object' && !Array.isArray(v) ? v : {}; },
+  get settings() { const v = this.get('settings', {}); return v && typeof v === 'object' && !Array.isArray(v) ? v : {}; },
   set settings(v) { this.set('settings', v); },
-  get records() { return this.get('records', {}); },
+  get records() { return this.obj('records'); },
   set records(v) { this.set('records', v); },
-  get fav() { return this.get('fav', {}); },
+  get fav() { return this.obj('fav'); },
   set fav(v) { this.set('fav', v); },
-  get sessions() { return this.get('sessions', {}); },
+  get sessions() { return this.obj('sessions'); },
   set sessions(v) { this.set('sessions', v); },
-  get daily() { return this.get('daily', {}); },
+  get daily() { return this.obj('daily'); },
   set daily(v) { this.set('daily', v); },
   get lastKey() { return this.get('lastKey', null); },
   set lastKey(v) { this.set('lastKey', v); },
@@ -60,7 +62,7 @@ const Store = {
     const f = this.fav;
     if (on) f[q.qid] = { pid: ref.pid, n: ref.n, m: ref.m, paper: ref.paper, tag: q.tag, txt: stripHtml(q.stem).slice(0, 90) };
     else delete f[q.qid];
-    this.fav = f;
+    return this.set('fav', f);
   },
   wrongs() {
     return Object.entries(this.records).filter(([, r]) => r.last === 0).map(([qid, r]) => ({ qid, ...r }));
@@ -73,21 +75,35 @@ const Store = {
 };
 
 /* ---------------- 数据加载 ---------------- */
+// 失败的请求不写入缓存，网络恢复后重试可成功（避免一次抖动永久卡死）
+const getJson = async (url, cache, key) => {
+  if (cache.has(key)) return cache.get(key);
+  const p = fetch(url).then((r) => {
+    if (!r.ok) throw new Error(`数据加载失败（HTTP ${r.status}）`);
+    return r.json();
+  }).catch((e) => { cache.delete(key); throw e; });
+  cache.set(key, p);
+  return p;
+};
 const Data = {
   idx: null,
   pCache: new Map(),
   tCache: new Map(),
   async index() {
-    if (!this.idx) this.idx = await fetch('data/index.json').then((r) => r.json());
+    if (!this.idx) {
+      this.idx = fetch('data/index.json').then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      }).catch((e) => { this.idx = null; throw new Error('题库索引加载失败，请检查网络后刷新重试'); });
+    }
     return this.idx;
   },
   async paper(id) {
-    if (!this.pCache.has(id)) this.pCache.set(id, fetch(`data/papers/${id}.json`).then((r) => r.json()));
-    return this.pCache.get(id);
+    if (typeof id !== 'string' || !/^m\d-\d{3}$/.test(id)) throw new Error('试卷地址无效');
+    return getJson(`data/papers/${id}.json`, this.pCache, id);
   },
   async tags(m) {
-    if (!this.tCache.has(m)) this.tCache.set(m, fetch(`data/tags/m${m}.json`).then((r) => r.json()));
-    return this.tCache.get(m);
+    return getJson(`data/tags/m${m}.json`, this.tCache, m);
   },
   flat(p) {
     if (!p._flat) {
@@ -128,7 +144,8 @@ const Sess = {
       for (const meta of papers) {
         if (pool.length >= n * 3 && order === 'random') break;
         if (loaded >= 12) break;
-        const p = await Data.paper(meta.id);
+        let p;
+        try { p = await Data.paper(meta.id); } catch { continue; }
         for (const q of Data.flat(p)) {
           if (onlyNew && recs[q.qid]) continue;
           pool.push({ pid: p.id, n: q.n, gi: q.gi });
@@ -140,7 +157,8 @@ const Sess = {
     const seen = new Set();
     const items = [];
     for (const it of pool) {
-      const p = await Data.paper(it.pid);
+      let p;
+      try { p = await Data.paper(it.pid); } catch { continue; }
       const q = Data.findQ(p, it.n);
       if (!q || seen.has(q.qid)) continue;
       if (onlyNew && recs[q.qid]) continue;
@@ -492,7 +510,7 @@ const Cfg = { ms: new Set([1, 2, 3, 4, 5, 6]), tag: '', n: 20, order: 'random', 
 routes.practice = async (_, query) => {
   rerender = () => routes.practice(_, query);
   const idx = await Data.index();
-  if (query.m) { Cfg.ms = new Set([+query.m]); }
+  if (query.m && [1,2,3,4,5,6].includes(+query.m)) { Cfg.ms = new Set([+query.m]); }
   // 考点列表
   const tagCount = new Map();
   for (const m of Cfg.ms) {
@@ -552,32 +570,49 @@ const Run = {
   sess: null, papers: new Map(), pending: [], timerId: null, sheetOpen: false,
 
   async load(key, seekQid) {
-    const s = Store.getSession(key);
-    if (!s) { location.hash = '#/'; return null; }
+    let s = null;
+    try { s = Store.getSession(key); } catch { s = null; }
+    // 会话结构损坏：无法恢复则丢弃并回首页
+    if (!s || !Array.isArray(s.items) || !s.items.length || typeof s.key !== 'string') {
+      if (key) Store.delSession(key);
+      toast('练习记录已损坏，已为你返回首页');
+      location.hash = '#/';
+      return null;
+    }
+    if (!s.answers || typeof s.answers !== 'object') s.answers = {};
+    if (!Number.isFinite(s.startTs)) s.startTs = Date.now();
     this.sess = s;
     this.papers = new Map();
-    await Promise.all([...new Set(s.items.map((i) => i.pid))].map(async (pid) => {
-      this.papers.set(pid, await Data.paper(pid));
-    }));
-    // 回填 gi / qid（兼容旧会话）
+    const pids = [...new Set(s.items.map((i) => i && i.pid).filter(Boolean))];
+    const results = await Promise.allSettled(pids.map((pid) => Data.paper(pid)));
+    results.forEach((r, i) => { if (r.status === 'fulfilled') this.papers.set(pids[i], r.value); });
+    // 丢弃加载不到试卷的条目；回填 gi / qid（兼容旧会话）
+    s.items = s.items.filter((it) => it && this.papers.has(it.pid));
     for (const it of s.items) {
-      if (it.gi === undefined || it.qid === undefined) {
-        const p = this.papers.get(it.pid);
-        const q = Data.findQ(p, it.n);
-        if (q) { it.gi = q.gi; it.qid = q.qid; }
-        else it.gi = 0;
-      }
+      const q = Data.findQ(this.papers.get(it.pid), it.n);
+      if (q) { it.gi = q.gi; it.qid = q.qid; }
+    }
+    s.items = s.items.filter((it) => it.qid !== undefined);
+    if (!s.items.length) {
+      Store.delSession(key);
+      toast('该练习的题目数据已不可用');
+      location.hash = '#/';
+      return null;
     }
     if (seekQid !== undefined) {
       const idx = s.items.findIndex((i) => String(i.qid) === String(seekQid));
       if (idx >= 0) s.pos = idx;
     }
+    s.pos = clamp(Number.isInteger(s.pos) ? s.pos : 0, 0, s.items.length - 1);
+    Store.saveSession(s);
     return s;
   },
   item(i = this.sess.pos) { return this.sess.items[i]; },
   question(i = this.sess.pos) {
     const it = this.item(i);
-    return Data.findQ(this.papers.get(it.pid), it.n);
+    if (!it) return null;
+    const p = this.papers.get(it.pid);
+    return p ? Data.findQ(p, it.n) : null;
   },
   revealed(i = this.sess.pos) {
     const s = this.sess;
@@ -589,6 +624,7 @@ const Run = {
 
   grade(i, chosen) {
     const s = this.sess, q = this.question(i);
+    if (!q || !Array.isArray(q.ans)) throw new Error('题目数据缺失，无法判分');
     const p = this.papers.get(this.item(i).pid);
     const ok = chosen.length === q.ans.length && chosen.every((k) => q.ans.includes(k));
     s.answers[i] = { a: chosen, ok, t: Date.now() };
@@ -609,8 +645,9 @@ const Run = {
     let correct = 0;
     for (let i = 0; i < s.items.length; i++) {
       const a = s.answers[i];
-      if (!a) continue;
+      if (!a || !Array.isArray(a.a)) continue;
       const q = this.question(i);
+      if (!q || !Array.isArray(q.ans)) continue;
       const p = this.papers.get(this.item(i).pid);
       const ok = a.a.length === q.ans.length && a.a.every((k) => q.ans.includes(k));
       a.ok = ok;
@@ -628,8 +665,8 @@ const Run = {
     this.stopTimer();
     const el = $('#runTimer');
     const tick = () => {
-      if (!el || !this.sess) return;
-      const elapsed = Math.floor((Date.now() - this.sess.startTs) / 1000);
+      if (!el || !this.sess || !Number.isFinite(this.sess.startTs)) return;
+      const elapsed = Math.max(0, Math.floor((Date.now() - this.sess.startTs) / 1000));
       if (this.sess.mode === 'exam' && this.sess.examMins > 0) {
         const left = this.sess.examMins * 60 - elapsed;
         if (left <= 0) {
@@ -668,8 +705,20 @@ function renderRun() {
   const s = Run.sess;
   const i = s.pos;
   const item = Run.item();
-  const paper = Run.papers.get(item.pid);
+  const paper = item ? Run.papers.get(item.pid) : null;
   const q = Run.question();
+  if (!item || !paper || !q) {
+    Run.stopTimer();
+    view.innerHTML = `<div class="empty"><div class="big">⚠️</div>
+      <div class="t">这道题的数据暂时不可用</div>
+      <div class="d">可能是网络问题，重新进入本练习会自动跳过失效题目</div>
+      <div style="display:flex;gap:10px;justify-content:center;">
+        <a class="btn btn-primary" href="#/s/${encodeURIComponent(s.key)}">重新进入</a>
+        <button class="btn" data-act="run-exit">返回</button>
+      </div></div>`;
+    renderSheet();
+    return;
+  }
   const ans = s.answers[i];
   const revealed = Run.revealed();
   const isFav = !!Store.fav[q.qid];
@@ -741,7 +790,7 @@ function renderRun() {
     <span class="sp"></span>
     ${i === s.items.length - 1 && s.mode === 'exam' && !s.submitted
       ? '<button class="btn btn-accent" data-act="want-submit">交卷</button>'
-      : `<button class="btn btn-primary" data-act="run-next">${i === s.items.length - 1 ? '已是最后一题' : '下一题 →'}</button>`}
+      : `<button class="btn btn-primary" data-act="run-next" ${i === s.items.length - 1 ? 'disabled' : ''}>${i === s.items.length - 1 ? '已是最后一题' : '下一题 →'}</button>`}
   </div>`;
 
   if (!s.submitted) Run.startTimer(); else Run.stopTimer();
@@ -786,7 +835,8 @@ function renderSheet() {
       <div class="qgrid">
         ${s.items.map((it, idx) => {
           const a = s.answers[idx];
-          const q = Data.findQ(Run.papers.get(it.pid), it.n);
+          const _p = Run.papers.get(it.pid);
+          const q = _p ? Data.findQ(_p, it.n) : null;
           let cls = 'qg';
           if (Run.revealed(idx) && a) cls += a.ok ? ' ok' : ' no';
           if (idx === s.pos) cls += ' cur';
@@ -1004,6 +1054,7 @@ document.addEventListener('click', async (e) => {
   if (!el) return;
   const act = el.dataset.act;
 
+  try {
   switch (act) {
     case 'go-practice': location.hash = '#/practice'; break;
     case 'module-practice': location.hash = `#/practice?m=${el.dataset.m}`; break;
@@ -1101,9 +1152,10 @@ document.addEventListener('click', async (e) => {
     }
     case 'toggle-fav': {
       const q = Run.question(); const on = !Store.fav[q.qid];
-      Store.toggleFav(on, q, { pid: Run.item().pid, n: Run.item().n, m: Run.papers.get(Run.item().pid).m, paper: Run.sess.title });
+      const written = Store.toggleFav(on, q, { pid: Run.item().pid, n: Run.item().n, m: Run.papers.get(Run.item().pid).m, paper: Run.sess.title });
       renderRun();
-      toast(on ? '已加入收藏' : '已取消收藏');
+      if (!written) toast('收藏失败：浏览器存储不可用（如隐私模式）');
+      else toast(on ? '已加入收藏' : '已取消收藏');
       break;
     }
     case 'run-exit': {
@@ -1173,10 +1225,15 @@ document.addEventListener('click', async (e) => {
       break;
     }
   }
+  } catch (err) {
+    console.error('[action failed]', act, err);
+    toast(`操作失败：${err.message || '请刷新后重试'}`);
+  }
 });
 
 function move(d) {
   const s = Run.sess;
+  if (!s || !Array.isArray(s.items) || !s.items.length) return;
   const n = clamp(s.pos + d, 0, s.items.length - 1);
   if (n === s.pos) return;
   s.pos = n;
