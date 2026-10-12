@@ -737,7 +737,7 @@ function renderRun() {
 
   <div class="run-dock">
     <button class="btn" data-act="run-prev" ${i === 0 ? 'disabled' : ''}>← 上一题</button>
-    <button class="btn btn-ghost fav-btn ${isFav ? 'on' : ''}" data-act="toggle-fav">${isFav ? '★ 已收藏' : '☆ 收藏'}</button>
+    <button class="btn btn-ghost fav-btn ${isFav ? 'on' : ''}" data-act="toggle-fav" aria-pressed="${isFav}" title="收藏（F）"><span class="fav-ico">${isFav ? '★' : '☆'}</span><span class="fav-txt">${isFav ? '已收藏' : '收藏'}</span></button>
     <span class="sp"></span>
     ${i === s.items.length - 1 && s.mode === 'exam' && !s.submitted
       ? '<button class="btn btn-accent" data-act="want-submit">交卷</button>'
